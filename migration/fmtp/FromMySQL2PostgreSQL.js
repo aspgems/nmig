@@ -651,138 +651,6 @@ function processView() {
 }
 
 /**
- * Starts a process of foreign keys creation.
- *
- * @returns {Promise}
- */
-function processForeignKey() {
-    return getStatelog('foreign_keys_loaded').then(stateLog => {
-        return new Promise(resolve => {
-            let fkPromises = [];
-
-            if (!stateLog) {
-                for (let i = 0; i < self._tablesToMigrate.length; ++i) {
-                    let tableName = self._tablesToMigrate[i];
-                    log(self, '\t--[processForeignKey] Search foreign keys for table "' + self._schema + '"."' + tableName + '"...');
-                    fkPromises.push(
-                        new Promise(fkResolve => {
-                            self._mysql.getConnection((error, connection) => {
-                                if (error) {
-                                    // The connection is undefined.
-                                    generateError(self, '\t--[processForeignKey] Cannot connect to MySQL server...\n' + error);
-                                    fkResolve();
-                                } else {
-                                    let sql = "SELECT cols.COLUMN_NAME, refs.REFERENCED_TABLE_NAME, refs.REFERENCED_COLUMN_NAME, "
-                                            + "cRefs.UPDATE_RULE, cRefs.DELETE_RULE, cRefs.CONSTRAINT_NAME "
-                                            + "FROM INFORMATION_SCHEMA.`COLUMNS` AS cols "
-                                            + "INNER JOIN INFORMATION_SCHEMA.`KEY_COLUMN_USAGE` AS refs "
-                                            + "ON refs.TABLE_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND refs.REFERENCED_TABLE_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND refs.TABLE_NAME = cols.TABLE_NAME "
-                                            + "AND refs.COLUMN_NAME = cols.COLUMN_NAME "
-                                            + "LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS AS cRefs "
-                                            + "ON cRefs.CONSTRAINT_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND cRefs.CONSTRAINT_NAME = refs.CONSTRAINT_NAME "
-                                            + "LEFT JOIN INFORMATION_SCHEMA.`KEY_COLUMN_USAGE` AS links "
-                                            + "ON links.TABLE_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND links.REFERENCED_TABLE_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND links.REFERENCED_TABLE_NAME = cols.TABLE_NAME "
-                                            + "AND links.REFERENCED_COLUMN_NAME = cols.COLUMN_NAME "
-                                            + "LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS AS cLinks "
-                                            + "ON cLinks.CONSTRAINT_SCHEMA = cols.TABLE_SCHEMA "
-                                            + "AND cLinks.CONSTRAINT_NAME = links.CONSTRAINT_NAME "
-                                            + "WHERE cols.TABLE_SCHEMA = '" + self._mySqlDbName + "' "
-                                            + "AND cols.TABLE_NAME = '" + tableName + "';";
-
-                                      connection.query(sql, (err, rows) => {
-                                          connection.release();
-
-                                          if (err) {
-                                              generateError(self, self, '\t--[processForeignKey] ' + err, sql);
-                                              fkResolve();
-                                          } else {
-                                              processForeignKeyWorker(tableName, rows).then(() => {
-                                                  log(self, '\t--[processForeignKey] Foreign keys for table "' + self._schema + '"."' + tableName + '" are set...');
-                                                  fkResolve();
-                                              });
-                                          }
-                                      });
-                                  }
-                            });
-                        })
-                    );
-                }
-            }
-
-            Promise.all(fkPromises).then(() => resolve());
-        });
-    });
-}
-
-/**
- * Creates foreign keys for given table.
- *
- * @param   {String} tableName
- * @param   {Array}  rows
- * @returns {Promise}
- */
-function processForeignKeyWorker(tableName, rows) {
-    return new Promise(resolve => {
-        let constraintsPromises = [];
-        let objConstraints      = Object.create(null);
-
-        for (let i = 0; i < rows.length; ++i) {
-            if (rows[i].CONSTRAINT_NAME in objConstraints) {
-                objConstraints[rows[i].CONSTRAINT_NAME].column_name.push('"' + rows[i].COLUMN_NAME + '"');
-                objConstraints[rows[i].CONSTRAINT_NAME].referenced_column_name.push('"' + rows[i].REFERENCED_COLUMN_NAME + '"');
-            } else {
-                objConstraints[rows[i].CONSTRAINT_NAME]                        = Object.create(null);
-                objConstraints[rows[i].CONSTRAINT_NAME].column_name            = ['"' + rows[i].COLUMN_NAME + '"'];
-                objConstraints[rows[i].CONSTRAINT_NAME].referenced_column_name = ['"' + rows[i].REFERENCED_COLUMN_NAME + '"'];
-                objConstraints[rows[i].CONSTRAINT_NAME].referenced_table_name  = rows[i].REFERENCED_TABLE_NAME;
-                objConstraints[rows[i].CONSTRAINT_NAME].update_rule            = rows[i].UPDATE_RULE;
-                objConstraints[rows[i].CONSTRAINT_NAME].delete_rule            = rows[i].DELETE_RULE;
-            }
-        }
-
-        rows = null;
-
-        for (let attr in objConstraints) {
-            constraintsPromises.push(
-                new Promise(resolveConstraintPromise => {
-                    self._pg.connect((error, client, done) => {
-                        if (error) {
-                            objConstraints[attr] = null;
-                            generateError(self, '\t--[processForeignKeyWorker] Cannot connect to PostgreSQL server...');
-                            resolveConstraintPromise();
-                        } else {
-                            let sql = 'ALTER TABLE "' + self._schema + '"."' + tableName + '" ADD FOREIGN KEY ('
-                                    + objConstraints[attr].column_name.join(',') + ') REFERENCES "' + self._schema + '"."'
-                                    + objConstraints[attr].referenced_table_name + '" (' + objConstraints[attr].referenced_column_name.join(',')
-                                    + ') ON UPDATE ' + objConstraints[attr].update_rule + ' ON DELETE ' + objConstraints[attr].delete_rule + ';';
-
-                            objConstraints[attr] = null;
-                            client.query(sql, err => {
-                                done();
-
-                                if (err) {
-                                    generateError(self, '\t--[processForeignKeyWorker] ' + err, sql);
-                                    resolveConstraintPromise();
-                                } else {
-                                    resolveConstraintPromise();
-                                }
-                            });
-                        }
-                    });
-                })
-            );
-        }
-
-        Promise.all(constraintsPromises).then(() => resolve());
-    });
-}
-
-/**
  * Runs "vacuum full" and "analyze".
  *
  * @returns {Promise}
@@ -895,6 +763,114 @@ function createTable(tableName) {
 }
 
 /**
+ * Disable referential integrity
+ *
+ * @param   {String} tableName
+ * @returns {Promise}
+ */
+function disableTriggers(tableName) {
+  return connect(self).then(() => {
+      return new Promise((resolveDisableTriggers, rejectDisableTriggers) => {
+          log(self, '\t--[disableTriggers] Disable referential integrity from table : `' + tableName + '`', self._dicTables[tableName].tableLogPath);
+          self._pg.connect((error, client, done) => {
+              if (error) {
+                  generateError(self, '\t--[disableTriggers] Cannot connect to PostgreSQL server...\n' + error, sql);
+                  rejectDisableTriggers();
+              } else {
+                  let sql = 'ALTER TABLE "' + self._schema + '"."' + tableName + '" DISABLE TRIGGER ALL';
+
+                  client.query(sql, err => {
+                      done();
+
+                      if (err) {
+                          generateError(self, '\t--[disableTriggers] ' + err, sql);
+                          rejectDisableTriggers();
+                      } else {
+                          log(self,
+                              '\t--[disableTriggers] Table "' + self._schema + '"."' + tableName + '" has referential integrity disabled...', 
+                              self._dicTables[tableName].tableLogPath);
+                          resolveDisableTriggers();
+                      }
+                  });
+              }
+          });
+      });
+  });
+}
+
+/**
+ * Deletes all records in table (in case table exists before createTable and has some data)
+ *
+ * @param   {String} tableName
+ * @returns {Promise}
+ */
+function clearTable(tableName) {
+  return connect(self).then(() => {
+      return new Promise((resolveClearTable, rejectClearTable) => {
+          log(self, '\t--[clearTable] Removing all content from table : `' + tableName + '`', self._dicTables[tableName].tableLogPath);
+          self._pg.connect((error, client, done) => {
+              if (error) {
+                  generateError(self, '\t--[clearTable] Cannot connect to PostgreSQL server...\n' + error, sql);
+                  rejectClearTable();
+              } else {
+                  let sql = 'DELETE FROM "' + self._schema + '"."' + tableName + '"';
+
+                  client.query(sql, err => {
+                      done();
+
+                      if (err) {
+                          generateError(self, '\t--[clearTable] ' + err, sql);
+                          rejectClearTable();
+                      } else {
+                          log(self,
+                              '\t--[clearTable] Table "' + self._schema + '"."' + tableName + '" is cleared.', 
+                              self._dicTables[tableName].tableLogPath);
+                          resolveClearTable();
+                      }
+                  });
+              }
+          });
+      });
+  });
+}
+
+/**
+ * Enable referential integrity back
+ *
+ * @param   {String} tableName
+ * @returns {Promise}
+ */
+function enableTriggers(tableName) {
+  return connect(self).then(() => {
+      return new Promise((resolveEnableTriggers, rejectEnableTriggers) => {
+          log(self, '\t--[enableTriggers] Enable referential integrity from table : `' + tableName + '`', self._dicTables[tableName].tableLogPath);
+          self._pg.connect((error, client, done) => {
+              if (error) {
+                  generateError(self, '\t--[enableTriggers] Cannot connect to PostgreSQL server...\n' + error, sql);
+                  rejectEnableTriggers();
+              } else {
+                  let sql = 'ALTER TABLE "' + self._schema + '"."' + tableName + '" ENABLE TRIGGER ALL';
+
+                  client.query(sql, err => {
+                      done();
+
+                      if (err) {
+                          generateError(self, '\t--[enableTriggers] ' + err, sql);
+                          rejectEnableTriggers();
+                      } else {
+                          log(self,
+                              '\t--[enableTriggers] Table "' + self._schema + '"."' + tableName + '" has referential integrity enabled...', 
+                              self._dicTables[tableName].tableLogPath);
+                          resolveEnableTriggers();
+                      }
+                  });
+              }
+          });
+      });
+  });
+}
+
+/**
  * Define which columns of the given table are of type "enum".
  * Set an appropriate constraint, if need.
  *
@@ -954,61 +930,6 @@ function processEnum(tableName) {
 }
 
 /**
- * Define which columns of the given table can contain the "NULL" value.
- * Set an appropriate constraint, if need.
- *
- * @param   {String} tableName
- * @returns {Promise}
- */
-function processNull(tableName) {
-    return connect(self).then(() => {
-        return new Promise(resolve => {
-            log(self, '\t--[processNull] Defines "NULLs" for table: "' + self._schema + '"."' + tableName + '"', self._dicTables[tableName].tableLogPath);
-            let processNullPromises = [];
-
-            for (let i = 0; i < self._dicTables[tableName].arrTableColumns.length; ++i) {
-                if (self._dicTables[tableName].arrTableColumns[i].Null.toLowerCase() === 'no') {
-                    processNullPromises.push(
-                        new Promise(resolveProcessNull => {
-                            self._pg.connect((error, client, done) => {
-                                if (error) {
-                                    let msg = '\t--[processNull] Cannot connect to PostgreSQL server...\n' + error;
-                                    generateError(self, msg);
-                                    resolveProcessNull();
-                                } else {
-                                    let sql = 'ALTER TABLE "' + self._schema + '"."' + tableName
-                                            + '" ALTER COLUMN "' + self._dicTables[tableName].arrTableColumns[i].Field + '" SET NOT NULL;';
-
-                                    client.query(sql, err => {
-                                        done();
-
-                                        if (err) {
-                                            let msg = '\t--[processNull] Error while setting NULL for "' + self._schema + '"."'
-                                                    + tableName + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...\n' + err;
-
-                                            generateError(self, msg, sql);
-                                            resolveProcessNull();
-                                        } else {
-                                            let success = '\t--[processNull] Set NULL for "' + self._schema + '"."' + tableName
-                                                        + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...';
-
-                                            log(self, success, self._dicTables[tableName].tableLogPath);
-                                            resolveProcessNull();
-                                        }
-                                    });
-                                }
-                            });
-                        })
-                    );
-                }
-            }
-
-            Promise.all(processNullPromises).then(() => resolve());
-        });
-    });
-}
-
-/**
  * Returns the default value for a column, with the needed transformations.
  *
  * @param   {Conversion}    self
@@ -1045,309 +966,6 @@ function columnDefault(self, column) {
 }
 
 /**
- * Define which columns of the given table have default value.
- * Set default values, if need.
- *
- * @param   {String} tableName
- * @returns {Promise}
- */
-function processDefault(tableName) {
-    return connect(self).then(() => {
-        return new Promise(resolve => {
-            log(self, '\t--[processDefault] Defines default values for table: "' + self._schema + '"."' + tableName + '"', self._dicTables[tableName].tableLogPath);
-            let processDefaultPromises = [];
-
-            for (let i = 0; i < self._dicTables[tableName].arrTableColumns.length; ++i) {
-                if (self._dicTables[tableName].arrTableColumns[i].Default !== null) {
-                    processDefaultPromises.push(
-                        new Promise(resolveProcessDefault => {
-                            self._pg.connect((error, client, done) => {
-                                if (error) {
-                                    let msg = '\t--[processDefault] Cannot connect to PostgreSQL server...\n' + error;
-                                    generateError(self, msg);
-                                    resolveProcessDefault();
-                                } else {
-                                    let sql = 'ALTER TABLE "' + self._schema + '"."' + tableName
-                                            + '" ' + 'ALTER COLUMN "' + self._dicTables[tableName].arrTableColumns[i].Field
-                                            + '" SET DEFAULT ' + columnDefault(self, self._dicTables[tableName].arrTableColumns[i]) + ';';
-
-                                    client.query(sql, err => {
-                                        done();
-
-                                        if (err) {
-                                            let msg = '\t--[processDefault] Error occurred when tried to set default value for "'
-                                                    + self._schema + '"."' + tableName
-                                                    + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...\n' + err;
-
-                                            generateError(self, msg, sql);
-                                            resolveProcessDefault();
-                                        } else {
-                                            let success = '\t--[processDefault] Set default value for "' + self._schema + '"."' + tableName
-                                                        + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...';
-
-                                            log(self, success, self._dicTables[tableName].tableLogPath);
-                                            resolveProcessDefault();
-                                        }
-                                    });
-                                }
-                            });
-                        })
-                    );
-                }
-            }
-
-            Promise.all(processDefaultPromises).then(() => resolve());
-        });
-    });
-}
-
-/**
- * Define which column in given table has the "auto_increment" attribute.
- * Create an appropriate sequence.
- *
- * @param   {String} tableName
- * @returns {Promise}
- */
-function createSequence(tableName) {
-    return connect(self).then(() => {
-        return new Promise(resolve => {
-            let createSequencePromises = [];
-
-            for (let i = 0; i < self._dicTables[tableName].arrTableColumns.length; ++i) {
-                if (self._dicTables[tableName].arrTableColumns[i].Extra === 'auto_increment') {
-                    createSequencePromises.push(
-                        new Promise(resolveCreateSequence => {
-                            let seqName = tableName + '_' + self._dicTables[tableName].arrTableColumns[i].Field + '_seq';
-                            log(self, '\t--[createSequence] Trying to create sequence : "' + self._schema + '"."' + seqName + '"', self._dicTables[tableName].tableLogPath);
-                            self._pg.connect((error, client, done) => {
-                                if (error) {
-                                    let msg = '\t--[createSequence] Cannot connect to PostgreSQL server...\n' + error;
-                                    generateError(self, msg);
-                                    resolveCreateSequence();
-                                } else {
-                                    let sql = 'CREATE SEQUENCE "' + self._schema + '"."' + seqName + '";';
-                                    client.query(sql, err => {
-                                        if (err) {
-                                            done();
-                                            let errMsg = '\t--[createSequence] Failed to create sequence "' + self._schema + '"."' + seqName + '"';
-                                            generateError(self, errMsg, sql);
-                                            resolveCreateSequence();
-                                        } else {
-                                             sql = 'ALTER TABLE "' + self._schema + '"."' + tableName + '" '
-                                                 + 'ALTER COLUMN "' + self._dicTables[tableName].arrTableColumns[i].Field + '" '
-                                                 + 'SET DEFAULT NEXTVAL(\'"' + self._schema + '"."' + seqName + '"\');';
-
-                                             client.query(sql, err2 => {
-                                                 if (err2) {
-                                                     done();
-                                                     let err2Msg = '\t--[createSequence] Failed to set default value for "' + self._schema + '"."'
-                                                                + tableName + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...'
-                                                                + '\n\t--[createSequence] Note: sequence "' + self._schema + '"."' + seqName + '" was created...';
-
-                                                     generateError(self, err2Msg, sql);
-                                                     resolveCreateSequence();
-                                                 } else {
-                                                       sql = 'ALTER SEQUENCE "' + self._schema + '"."' + seqName + '" '
-                                                           + 'OWNED BY "' + self._schema + '"."' + tableName
-                                                           + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '";';
-
-                                                       client.query(sql, err3 => {
-                                                            if (err3) {
-                                                                done();
-                                                                let err3Msg = '\t--[createSequence] Failed to relate sequence "' + self._schema + '"."' + seqName + '" to '
-                                                                           + '"' + self._schema + '"."'
-                                                                           + tableName + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...';
-
-                                                                generateError(self, err3Msg, sql);
-                                                                resolveCreateSequence();
-                                                            } else {
-                                                               sql = 'SELECT SETVAL(\'"' + self._schema + '"."' + seqName + '"\', '
-                                                                   + '(SELECT MAX("' + self._dicTables[tableName].arrTableColumns[i].Field + '") FROM "'
-                                                                   + self._schema + '"."' + tableName + '"));';
-
-                                                               client.query(sql, err4 => {
-                                                                  done();
-
-                                                                  if (err4) {
-                                                                      let err4Msg = '\t--[createSequence] Failed to set max-value of "' + self._schema + '"."'
-                                                                                  + tableName + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '" '
-                                                                                  + 'as the "NEXTVAL of "' + self._schema + '"."' + seqName + '"...';
-
-                                                                      generateError(self, err4Msg, sql);
-                                                                      resolveCreateSequence();
-                                                                  } else {
-                                                                      let success = '\t--[createSequence] Sequence "' + self._schema + '"."' + seqName + '" is created...';
-                                                                      log(self, success, self._dicTables[tableName].tableLogPath);
-                                                                      resolveCreateSequence();
-                                                                  }
-                                                               });
-                                                            }
-                                                       });
-                                                   }
-                                             });
-                                         }
-                                    });
-                                }
-                            });
-                        })
-                    );
-                }
-            }
-
-            Promise.all(createSequencePromises).then(() => resolve());
-        });
-    });
-}
-
-/**
- * Create primary key and indices.
- *
- * @param   {String} tableName
- * @returns {Promise}
- */
-function processIndexAndKey(tableName) {
-    return connect(self).then(() => {
-        return new Promise(resolveProcessIndexAndKey => {
-            self._mysql.getConnection((error, connection) => {
-                if (error) {
-                    // The connection is undefined.
-                    generateError(self, '\t--[processIndexAndKey] Cannot connect to MySQL server...\n\t' + error);
-                    resolveProcessIndexAndKey();
-                } else {
-                    let sql = 'SHOW INDEX FROM `' + tableName + '`;';
-                    connection.query(sql, (err, arrIndices) => {
-                        connection.release();
-
-                        if (err) {
-                            generateError(self, '\t--[processIndexAndKey] ' + err, sql);
-                            resolveProcessIndexAndKey();
-                        } else {
-                            let objPgIndices               = Object.create(null);
-                            let cnt                        = 0;
-                            let indexType                  = '';
-                            let processIndexAndKeyPromises = [];
-
-                            for (let i = 0; i < arrIndices.length; ++i) {
-                                if (arrIndices[i].Key_name in objPgIndices) {
-                                    objPgIndices[arrIndices[i].Key_name].column_name.push('"' + arrIndices[i].Column_name + '"');
-                                } else {
-                                    objPgIndices[arrIndices[i].Key_name] = {
-                                        is_unique   : arrIndices[i].Non_unique === 0 ? true : false,
-                                        column_name : ['"' + arrIndices[i].Column_name + '"'],
-                                        Index_type  : ' USING ' + (arrIndices[i].Index_type === 'SPATIAL' ? 'GIST' : arrIndices[i].Index_type)
-                                    };
-                                }
-                            }
-
-                            for (let attr in objPgIndices) {
-                                processIndexAndKeyPromises.push(
-                                    new Promise(resolveProcessIndexAndKeySql => {
-                                        self._pg.connect((pgError, pgClient, done) => {
-                                            if (pgError) {
-                                                let msg = '\t--[processIndexAndKey] Cannot connect to PostgreSQL server...\n' + pgError;
-                                                generateError(self, msg);
-                                                resolveProcessIndexAndKeySql();
-                                            } else {
-                                                if (attr.toLowerCase() === 'primary') {
-                                                    indexType = 'PK';
-                                                    sql       = 'ALTER TABLE "' + self._schema + '"."' + tableName + '" '
-                                                              + 'ADD PRIMARY KEY(' + objPgIndices[attr].column_name.join(',') + ');';
-
-                                                } else {
-                                                    // "schema_idxname_{integer}_idx" - is NOT a mistake.
-                                                    let columnName = objPgIndices[attr].column_name[0].slice(1, -1) + cnt++;
-                                                    indexType      = 'index';
-                                                    sql            = 'CREATE ' + (objPgIndices[attr].is_unique ? 'UNIQUE ' : '') + 'INDEX "'
-                                                                   + self._schema + '_' + tableName + '_' + columnName + '_idx" ON "'
-                                                                   + self._schema + '"."' + tableName + '" '
-                                                                   + objPgIndices[attr].Index_type + ' (' + objPgIndices[attr].column_name.join(',') + ');';
-                                                }
-
-                                                pgClient.query(sql, err2 => {
-                                                    done();
-
-                                                    if (err2) {
-                                                        generateError(self, '\t--[processIndexAndKey] ' + err2, sql);
-                                                        resolveProcessIndexAndKeySql();
-                                                    } else {
-                                                        resolveProcessIndexAndKeySql();
-                                                    }
-                                                });
-                                            }
-                                        });
-                                    })
-                                );
-                            }
-
-                            Promise.all(processIndexAndKeyPromises).then(() => {
-                                let success = '\t--[processIndexAndKey] "' + self._schema + '"."' + tableName + '": PK/indices are successfully set...';
-                                log(self, success, self._dicTables[tableName].tableLogPath);
-                                resolveProcessIndexAndKey();
-                            });
-                        }
-                    });
-                }
-            });
-        });
-    });
-}
-
-/**
- * Create comments.
- *
- * @param   {String} tableName
- * @returns {Promise}
- */
-function processComment(tableName) {
-    return connect(self).then(() => {
-        return new Promise(resolve => {
-            log(self, '\t--[processComment] Creates comments for table "' + self._schema + '"."' + tableName + '"...', self._dicTables[tableName].tableLogPath);
-            let arrCommentPromises = [];
-
-            for (let i = 0; i < self._dicTables[tableName].arrTableColumns.length; ++i) {
-                if (self._dicTables[tableName].arrTableColumns[i].Comment !== '') {
-                    arrCommentPromises.push(
-                        new Promise(resolveComment => {
-                            self._pg.connect((error, client, done) => {
-                                if (error) {
-                                    let msg = '\t--[processComment] Cannot connect to PostgreSQL server...\n' + error;
-                                    generateError(self, msg);
-                                    resolveComment();
-                                } else {
-                                    let sql = 'COMMENT ON COLUMN "' + self._schema + '"."' + tableName + '"."'
-                                            + self._dicTables[tableName].arrTableColumns[i].Field
-                                            + '" IS \'' + self._dicTables[tableName].arrTableColumns[i].Comment + '\';';
-
-                                    client.query(sql, err => {
-                                        done();
-
-                                        if (err) {
-                                            let msg = '\t--[processComment] Error while processing comment for "' + self._schema + '"."'
-                                                    + tableName + '"."' + self._dicTables[tableName].arrTableColumns[i].Field + '"...\n' + err;
-
-                                            generateError(self, msg, sql);
-                                            resolveComment();
-                                        } else {
-                                            let success = '\t--[processComment] Set comment for "' + self._schema + '"."' + tableName
-                                                          + '" column: "' + self._dicTables[tableName].arrTableColumns[i].Field + '"...';
-
-                                            log(self, success, self._dicTables[tableName].tableLogPath);
-                                            resolveComment();
-                                        }
-                                    });
-                                }
-                            });
-                        })
-                    );
-                }
-            }
-
-            Promise.all(arrCommentPromises).then(() => resolve());
-        });
-    });
-}
-
-/**
  * Processes current table before data loading.
  *
  * @param   {String}  tableName
@@ -1357,6 +975,10 @@ function processComment(tableName) {
 function processTableBeforeDataLoading(tableName, stateLog) {
     return connect(self).then(() => {
         return createTable(tableName);
+    }).then(() => {
+        return disableTriggers(tableName);
+    }).then(() => {
+        return clearTable(tableName);
     }).then(() => {
         return prepareArrayOfTablesAndChunkOffsets(tableName, stateLog);
     }).catch(() => {
@@ -1623,27 +1245,13 @@ function continueProcessAfterDataLoading() {
             for (let i = 0; i < self._tablesToMigrate.length; ++i) {
                 let tableName = self._tablesToMigrate[i];
                 promises.push(
-                    processEnum(tableName).then(() => {
-                        return processNull(tableName);
-                    }).then(() => {
-                        return processDefault(tableName);
-                    }).then(() => {
-                        return createSequence(tableName);
-                    }).then(() => {
-                        return processIndexAndKey(tableName);
-                    }).then(() => {
-                        return processComment(tableName);
-                    })
+                    enableTriggers(tableName)
                 );
             }
         }
 
         Promise.all(promises).then(() => {
             updateStatelog('per_table_constraints_loaded').then(
-                processForeignKey
-            ).then(() => {
-                return updateStatelog('foreign_keys_loaded');
-            }).then(
                 dropDataPoolTable
             ).then(
                 processView
